@@ -1,12 +1,23 @@
+# [CF] 2026-04-10: 
+# 这个文件是 VideoMAE 的数据处理中枢。
+# 核心职责是定义数据增强流程，并为预训练、微调和测试提供对应的数据集构建函数。
+# 它将原始视频数据转换成模型可接受的张量，并生成关键的"管道掩码"。
+
 import os
 from torchvision import transforms
-from transforms import *
+from transforms import * # 导入视频数据增强的操作（如裁剪、缩放等）
 from masking_generator import TubeMaskingGenerator
-from kinetics import VideoClsDataset, VideoMAE
-from ssv2 import SSVideoClsDataset
+from kinetics import VideoClsDataset, VideoMAE # 导入用于 Kinetics 等数据集的类
+from ssv2 import SSVideoClsDataset # 导入用于 Something-Something V2 数据集的类
 
 
 class DataAugmentationForVideoMAE(object):
+    """
+    [CF] 专门为 VideoMAE 预训练任务设计的数据增强类。
+    
+    它的关键作用是：除了常规的图像增强，还会在每次被调用时，
+    动态生成一个用于遮盖视频片段的"管道掩码" (tube mask)。
+    """
     def __init__(self, args):
         self.input_mean = [0.485, 0.456, 0.406]  # IMAGENET_DEFAULT_MEAN
         self.input_std = [0.229, 0.224, 0.225]  # IMAGENET_DEFAULT_STD
@@ -24,6 +35,10 @@ class DataAugmentationForVideoMAE(object):
             )
 
     def __call__(self, images):
+        """
+        [CF] 使得类的实例可以像函数一样被调用。
+        返回值: (处理后的视频张量, 掩码)
+        """
         process_data, _ = self.transform(images)
         return process_data, self.masked_position_generator()
 
@@ -36,7 +51,13 @@ class DataAugmentationForVideoMAE(object):
 
 
 def build_pretraining_dataset(args):
+    """
+    [CF] 专门用于构建 VideoMAE 预训练数据集的函数。
+    """
+    # 1. 实例化包含掩码生成的数据增强类
     transform = DataAugmentationForVideoMAE(args)
+    # 2. 创建 VideoMAE 数据集实例
+    # 关键是将 transform 传递给它，这样每次读取视频后都会自动应用增强和生成掩码。
     dataset = VideoMAE(
         root=None,
         setting=args.data_path,
@@ -55,6 +76,12 @@ def build_pretraining_dataset(args):
 
 
 def build_dataset(is_train, test_mode, args):
+    """
+    [CF] 通用的数据集构建函数，主要用于微调和测试阶段。
+    它根据 args.data_set 参数来判断加载哪个数据集（Kinetics-400, SSV2, UCF101, HMDB51）。
+    """
+    # [CF] 根据传入的布尔参数 is_train 和 test_mode，决定数据集的模式 (mode)
+    # 并拼接对应的 CSV 标注文件路径 (anno_path)。
     if args.data_set == 'Kinetics-400':
         mode = None
         anno_path = None
@@ -179,6 +206,7 @@ def build_dataset(is_train, test_mode, args):
         nb_classes = 51
     else:
         raise NotImplementedError()
+    # [CF] 确保数据集的实际类别数与参数中定义的一致
     assert nb_classes == args.nb_classes
     print("Number of the class = %d" % args.nb_classes)
 

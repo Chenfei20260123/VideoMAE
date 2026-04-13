@@ -1,3 +1,8 @@
+# [CF] 2026-04-13:
+# 这个文件定义了用于视频分类任务的数据集类。
+# VideoClsDataset: 用于 Kinetics-400, UCF101, HMDB51 等标准数据集
+# VideoMAE: 专门用于 VideoMAE 预训练的数据集类
+
 import os
 import numpy as np
 from numpy.lib.function_base import disp
@@ -13,27 +18,37 @@ import video_transforms as video_transforms
 import volume_transforms as volume_transforms
 
 class VideoClsDataset(Dataset):
-    """Load your own video classification dataset."""
+    """Load your own video classification dataset."""    
+    """
+    [CF] 通用视频分类数据集类。
+    
+    用于加载 Kinetics-400, UCF101, HMDB51 等标准视频分类数据集。
+    支持三种模式：
+    - 'train': 训练模式，应用数据增强
+    - 'validation': 验证模式，使用中心裁剪
+    - 'test': 测试模式，使用多视角（时间片段+空间裁剪）评估
+    """
 
     def __init__(self, anno_path, data_path, mode='train', clip_len=8,
                  frame_sample_rate=2, crop_size=224, short_side_size=256,
                  new_height=256, new_width=340, keep_aspect_ratio=True,
                  num_segment=1, num_crop=1, test_num_segment=10, test_num_crop=3,args=None):
-        self.anno_path = anno_path
-        self.data_path = data_path
-        self.mode = mode
-        self.clip_len = clip_len
-        self.frame_sample_rate = frame_sample_rate
-        self.crop_size = crop_size
-        self.short_side_size = short_side_size
-        self.new_height = new_height
-        self.new_width = new_width
-        self.keep_aspect_ratio = keep_aspect_ratio
-        self.num_segment = num_segment
-        self.test_num_segment = test_num_segment
-        self.num_crop = num_crop
-        self.test_num_crop = test_num_crop
+        self.anno_path = anno_path          # 标注文件路径（CSV格式）
+        self.data_path = data_path          # 数据根目录
+        self.mode = mode                    # 模式：train / validation / test
+        self.clip_len = clip_len            # 采样的帧数
+        self.frame_sample_rate = frame_sample_rate  # 采样步长（每隔几帧取一帧）
+        self.crop_size = crop_size          # 裁剪尺寸
+        self.short_side_size = short_side_size  # 短边尺寸（用于缩放）
+        self.new_height = new_height        # 固定高度（如果不保持长宽比）
+        self.new_width = new_width          # 固定宽度（如果不保持长宽比）
+        self.keep_aspect_ratio = keep_aspect_ratio  # 是否保持长宽比
+        self.num_segment = num_segment      # 训练时的时间片段数
+        self.test_num_segment = test_num_segment  # 测试时的时间片段数
+        self.num_crop = num_crop            # 训练时的空间裁剪数
+        self.test_num_crop = test_num_crop  # 测试时的空间裁剪数
         self.args = args
+        # 是否启用数据增强和随机擦除
         self.aug = False
         self.rand_erase = False
         if self.mode in ['train']:
@@ -42,7 +57,8 @@ class VideoClsDataset(Dataset):
                 self.rand_erase = True
         if VideoReader is None:
             raise ImportError("Unable to import `decord` which is required to read videos.")
-
+        
+        # 读取标注文件：格式为 "视频路径 标签"
         import pandas as pd
         cleaned = pd.read_csv(self.anno_path, header=None, delimiter=' ')
         self.dataset_samples = list(cleaned.values[:, 0])
@@ -52,6 +68,7 @@ class VideoClsDataset(Dataset):
             pass
 
         elif (mode == 'validation'):
+            # 验证模式：缩放到短边 -> 中心裁剪 -> 转张量 -> 标准化
             self.data_transform = video_transforms.Compose([
                 video_transforms.Resize(self.short_side_size, interpolation='bilinear'),
                 video_transforms.CenterCrop(size=(self.crop_size, self.crop_size)),
@@ -60,6 +77,7 @@ class VideoClsDataset(Dataset):
                                            std=[0.229, 0.224, 0.225])
             ])
         elif mode == 'test':
+            # 测试模式：先只做缩放，后续手动进行多视角裁剪
             self.data_resize = video_transforms.Compose([
                 video_transforms.Resize(size=(short_side_size), interpolation='bilinear')
             ])
@@ -68,6 +86,8 @@ class VideoClsDataset(Dataset):
                 video_transforms.Normalize(mean=[0.485, 0.456, 0.406],
                                            std=[0.229, 0.224, 0.225])
             ])
+            # 构建测试用的多视角索引
+            # 每个视频会被采样 test_num_segment × test_num_crop 个视角
             self.test_seg = []
             self.test_dataset = []
             self.test_label_array = []
@@ -80,13 +100,16 @@ class VideoClsDataset(Dataset):
                         self.test_seg.append((ck, cp))
 
     def __getitem__(self, index):
+        """获取一个训练/验证/测试样本。"""
         if self.mode == 'train':
             args = self.args 
             scale_t = 1
 
             sample = self.dataset_samples[index]
+            # 加载视频帧：返回 numpy 数组，形状为 (T, H, W, C)
             buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t) # T H W C
             if len(buffer) == 0:
+                # 如果视频加载失败，随机选择另一个视频
                 while len(buffer) == 0:
                     warnings.warn("video {} not correctly loaded during training".format(sample))
                     index = np.random.randint(self.__len__())
@@ -94,6 +117,7 @@ class VideoClsDataset(Dataset):
                     buffer = self.loadvideo_decord(sample, sample_rate_scale=scale_t)
 
             if args.num_sample > 1:
+                # 重复采样：对同一个视频采样多个增强版本（用于测试时的多视角评估）
                 frame_list = []
                 label_list = []
                 index_list = []
@@ -106,7 +130,8 @@ class VideoClsDataset(Dataset):
                 return frame_list, label_list, index_list, {}
             else:
                 buffer = self._aug_frame(buffer, args)
-            
+
+            # 返回：视频张量, 标签, 视频文件名
             return buffer, self.label_array[index], index, {}
 
         elif self.mode == 'validation':
@@ -162,6 +187,17 @@ class VideoClsDataset(Dataset):
         buffer,
         args,
     ):
+        """
+        [CF] 对加载的视频帧应用数据增强。
+        
+        增强流程：
+        1. 创建 RandAugment 变换
+        2. 转换为 PIL 图像并应用 RandAugment
+        3. 转回张量并调整维度顺序
+        4. 标准化
+        5. 空间采样（随机裁剪、翻转等）
+        6. 随机擦除（可选）
+        """
 
         aug_transform = video_transforms.create_random_augment(
             input_size=(self.crop_size, self.crop_size),
@@ -220,7 +256,21 @@ class VideoClsDataset(Dataset):
 
 
     def loadvideo_decord(self, sample, sample_rate_scale=1):
-        """Load video content using Decord"""
+        """Load video content using Decord"""        
+        """
+        [CF] 使用 Decord 库加载视频帧。
+        
+        支持两种采样策略：
+        - 训练/验证：将视频均匀分段，每段内随机采样
+        - 测试：均匀采样整个视频
+        
+        Args:
+            sample: 视频文件路径
+            sample_rate_scale: 采样率缩放因子
+        
+        Returns:
+            numpy 数组，形状为 (T, H, W, C)
+        """
         fname = sample
 
         if not (os.path.exists(fname)):
@@ -315,10 +365,32 @@ def spatial_sampling(
         motion_shift (bool): Whether to apply motion shift for resizing.
     Returns:
         frames (tensor): spatially sampled frames.
+    """    
+    """
+    [CF] 对视频帧进行空间采样（缩放、裁剪、翻转）。
+    
+    这是训练/测试阶段的核心空间变换函数，支持两种模式：
+    1. 训练模式 (spatial_idx=-1)：随机缩放 + 随机裁剪 + 随机翻转
+    2. 测试模式 (spatial_idx=0,1,2)：固定缩放 + 均匀裁剪（左/中/右 或 上/中/下）
+    
+    Args:
+        frames (tensor): 视频帧，形状为 (T, H, W, C)
+        spatial_idx (int): -1 为随机采样；0,1,2 为均匀采样
+        min_scale, max_scale (int): 短边缩放范围
+        crop_size (int): 裁剪尺寸
+        random_horizontal_flip (bool): 是否随机水平翻转
+        aspect_ratio (list): 宽高比范围，如 [0.75, 1.3333]
+        scale (list): 面积比例范围，如 [0.08, 1.0]
+        motion_shift (bool): 是否使用带位移的裁剪（模拟相机运动）
+    
+    Returns:
+        frames (tensor): 空间采样后的视频帧
     """
     assert spatial_idx in [-1, 0, 1, 2]
     if spatial_idx == -1:
+        # ===== 训练模式：随机空间采样 =====
         if aspect_ratio is None and scale is None:
+            # 传统方式：短边缩放 + 随机裁剪
             frames, _ = video_transforms.random_short_side_scale_jitter(
                 images=frames,
                 min_size=min_scale,
@@ -327,6 +399,7 @@ def spatial_sampling(
             )
             frames, _ = video_transforms.random_crop(frames, crop_size)
         else:
+            # Inception 风格：随机缩放裁剪（可选带位移）
             transform_func = (
                 video_transforms.random_resized_crop_with_shift
                 if motion_shift
@@ -344,6 +417,8 @@ def spatial_sampling(
     else:
         # The testing is deterministic and no jitter should be performed.
         # min_scale, max_scale, and crop_size are expect to be the same.
+        # ===== 测试模式：确定性空间采样 =====
+        # 测试时不应有随机性，min_scale, max_scale, crop_size 应相等
         assert len({min_scale, max_scale, crop_size}) == 1
         frames, _ = video_transforms.random_short_side_scale_jitter(
             frames, min_scale, max_scale
@@ -359,6 +434,19 @@ def tensor_normalize(tensor, mean, std):
         tensor (tensor): tensor to normalize.
         mean (tensor or list): mean value to subtract.
         std (tensor or list): std to divide.
+    """    
+    """
+    [CF] 张量标准化：(tensor - mean) / std。
+    
+    支持 uint8 输入（自动转为 float 并除以 255）。
+    
+    Args:
+        tensor (tensor): 待标准化的张量
+        mean (list): 均值
+        std (list): 标准差
+    
+    Returns:
+        tensor: 标准化后的张量
     """
     if tensor.dtype == torch.uint8:
         tensor = tensor.float()
@@ -421,6 +509,21 @@ class VideoMAE(torch.utils.data.Dataset):
         Different types of data augmentation auto. Supports v1, v2, v3 and v4.
     lazy_init : bool, default False.
         If set to True, build a dataset instance without loading any dataset.
+    """    
+    """
+    [CF] 专门为 VideoMAE 预训练设计的数据集类。
+    
+    与 VideoClsDataset 的关键区别：
+    1. 不返回标签，而是返回 (视频张量, 掩码)
+    2. 使用 DataAugmentationForVideoMAE 作为 transform，它会在内部生成管道掩码
+    3. 时间采样策略：均匀分段 + 每段内连续采样
+    
+    参数说明（主要）:
+        root: 数据根目录
+        setting: 标注文件路径，每行格式: "视频路径 标签"
+        new_length: 采样的帧数（如 16）
+        new_step: 采样步长（如 2，表示每隔一帧取一帧）
+        transform: 数据增强函数（通常是 DataAugmentationForVideoMAE 实例）
     """
     def __init__(self,
                  root,
@@ -469,7 +572,13 @@ class VideoMAE(torch.utils.data.Dataset):
                                    "Check your data directory (opt.data-dir)."))
 
     def __getitem__(self, index):
-
+        """
+        [CF] 获取一个预训练样本。
+        
+        Returns:
+            process_data: 视频张量，形状为 (C, T, H, W)
+            mask: 管道掩码，形状为 (N,) 的布尔数组
+        """
         directory, target = self.clips[index]
         if self.video_loader:
             if '.' in directory.split('/')[-1]:
@@ -496,6 +605,11 @@ class VideoMAE(torch.utils.data.Dataset):
         return len(self.clips)
 
     def _make_dataset(self, directory, setting):
+        """
+        [CF] 读取标注文件，构建样本列表。
+        
+        标注文件格式：每行 "视频路径 标签"
+        """
         if not os.path.exists(setting):
             raise(RuntimeError("Setting file %s doesn't exist. Check opt.train-list and opt.val-list. " % (setting)))
         clips = []
@@ -513,6 +627,18 @@ class VideoMAE(torch.utils.data.Dataset):
         return clips
 
     def _sample_train_indices(self, num_frames):
+        """
+        [CF] 采样训练帧索引（均匀分段 + 每段内连续采样）。
+        
+        这是 VideoMAE 时间采样的核心：
+        1. 将视频均匀分成 num_segments 段
+        2. 在每段内随机选择一个起始点
+        3. 从起始点开始，以 new_step 为步长，连续取 new_length 帧
+        
+        Returns:
+            offsets: 每段的起始帧索引
+            skip_offsets: 段内的偏移量（用于 temporal jitter）
+        """
         average_duration = (num_frames - self.skip_length + 1) // self.num_segments
         if average_duration > 0:
             offsets = np.multiply(list(range(self.num_segments)),
@@ -536,6 +662,12 @@ class VideoMAE(torch.utils.data.Dataset):
 
 
     def _video_TSN_decord_batch_loader(self, directory, video_reader, duration, indices, skip_offsets):
+        """
+        [CF] 根据采样索引批量加载视频帧。
+        
+        Returns:
+            sampled_list: PIL Image 列表
+        """
         sampled_list = []
         frame_id_list = []
         for seg_ind in indices:

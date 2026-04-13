@@ -1,3 +1,10 @@
+# [CF] 2026-04-12:
+# 这个文件包含了 VideoMAE 微调（finetuning）的核心引擎。
+# 主要包括：
+# 1. train_one_epoch: 微调训练的一个 epoch
+# 2. validation_one_epoch: 验证集评估
+# 3. final_test: 测试集推理并保存结果
+
 import os
 import numpy as np
 import math
@@ -11,12 +18,28 @@ from scipy.special import softmax
 
 
 def train_class_batch(model, samples, target, criterion):
+    """
+    [CF] 执行一个分类批次的前向传播和损失计算。
+    
+    Args:
+        model: 分类模型
+        samples: 输入视频
+        target: 标签
+        criterion: 损失函数（交叉熵）
+    
+    Returns:
+        loss, outputs
+    """
     outputs = model(samples)
     loss = criterion(outputs, target)
     return loss, outputs
 
 
 def get_loss_scale_for_deepspeed(model):
+    """
+    [CF] 获取 DeepSpeed 模型当前的 loss scale 值。
+    用于日志记录。
+    """
     optimizer = model.optimizer
     return optimizer.loss_scale if hasattr(optimizer, "loss_scale") else optimizer.cur_scale
 
@@ -27,13 +50,40 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
                     model_ema: Optional[ModelEma] = None, mixup_fn: Optional[Mixup] = None, log_writer=None,
                     start_steps=None, lr_schedule_values=None, wd_schedule_values=None,
                     num_training_steps_per_epoch=None, update_freq=None):
+    """
+    [CF] 执行一个 epoch 的微调训练。
+    
+    与预训练的主要区别：
+    1. 使用交叉熵损失而非 MSE
+    2. 支持 Mixup/Cutmix 数据增强
+    3. 支持模型 EMA（指数移动平均）
+    4. 计算分类准确率
+    
+    Args:
+        model: 分类模型（VisionTransformer）
+        criterion: 损失函数
+        data_loader: 数据加载器
+        optimizer: 优化器
+        device: 计算设备
+        epoch: 当前 epoch
+        loss_scaler: 混合精度梯度缩放器
+        max_norm: 梯度裁剪阈值
+        model_ema: 模型 EMA（可选）
+        mixup_fn: Mixup/Cutmix 增强函数（可选）
+        log_writer: TensorBoard 写入器
+        start_steps: 起始步数
+        lr_schedule_values: 学习率调度数组
+        wd_schedule_values: 权重衰减调度数组
+        num_training_steps_per_epoch: 每个 epoch 的训练步数
+        update_freq: 梯度累积频率
+    """
     model.train(True)
     metric_logger = utils.MetricLogger(delimiter="  ")
     metric_logger.add_meter('lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     metric_logger.add_meter('min_lr', utils.SmoothedValue(window_size=1, fmt='{value:.6f}'))
     header = 'Epoch: [{}]'.format(epoch)
     print_freq = 10
-
+    # 初始化梯度
     if loss_scaler is None:
         model.zero_grad()
         model.micro_steps = 0
@@ -41,10 +91,12 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         optimizer.zero_grad()
 
     for data_iter_step, (samples, targets, _, _) in enumerate(metric_logger.log_every(data_loader, print_freq, header)):
+        # 计算实际步数（考虑梯度累积）
         step = data_iter_step // update_freq
         if step >= num_training_steps_per_epoch:
             continue
         it = start_steps + step  # global training iteration
+        # 更新学习率和权重衰减（每个累积周期开始时更新）
         # Update LR & WD for the first acc
         if lr_schedule_values is not None or wd_schedule_values is not None and data_iter_step % update_freq == 0:
             for i, param_group in enumerate(optimizer.param_groups):
@@ -55,16 +107,17 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
         samples = samples.to(device, non_blocking=True)
         targets = targets.to(device, non_blocking=True)
-
+        # 应用 Mixup/Cutmix 数据增强
         if mixup_fn is not None:
             samples, targets = mixup_fn(samples, targets)
 
+        # 前向传播
         if loss_scaler is None:
-            samples = samples.half()
+            samples = samples.half() # DeepSpeed 模式
             loss, output = train_class_batch(
                 model, samples, targets, criterion)
         else:
-            with torch.cuda.amp.autocast():
+            with torch.cuda.amp.autocast(): # 混合精度
                 loss, output = train_class_batch(
                     model, samples, targets, criterion)
 
@@ -74,6 +127,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             print("Loss is {}, stopping training".format(loss_value))
             sys.exit(1)
 
+        # 反向传播（考虑梯度累积）
         if loss_scaler is None:
             loss /= update_freq
             model.backward(loss)
@@ -100,7 +154,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             loss_scale_value = loss_scaler.state_dict()["scale"]
 
         torch.cuda.synchronize()
-
+        # 计算准确率（如果没有 Mixup）
         if mixup_fn is None:
             class_acc = (output.max(-1)[-1] == targets).float().mean()
         else:
@@ -114,6 +168,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             min_lr = min(min_lr, group["lr"])
             max_lr = max(max_lr, group["lr"])
 
+        # 记录指标
         metric_logger.update(lr=max_lr)
         metric_logger.update(min_lr=min_lr)
         weight_decay_value = None
@@ -123,6 +178,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
         metric_logger.update(weight_decay=weight_decay_value)
         metric_logger.update(grad_norm=grad_norm)
 
+        # 写入 TensorBoard
         if log_writer is not None:
             log_writer.update(loss=loss_value, head="loss")
             log_writer.update(class_acc=class_acc, head="loss")
@@ -135,6 +191,7 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
             log_writer.set_step()
 
     # gather the stats from all processes
+    # 汇总所有进程的指标
     metric_logger.synchronize_between_processes()
     print("Averaged stats:", metric_logger)
     return {k: meter.global_avg for k, meter in metric_logger.meters.items()}
@@ -142,6 +199,11 @@ def train_one_epoch(model: torch.nn.Module, criterion: torch.nn.Module,
 
 @torch.no_grad()
 def validation_one_epoch(data_loader, model, device):
+    """
+    [CF] 在验证集上评估模型。
+    
+    计算 loss、Acc@1 和 Acc@5。
+    """
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -178,6 +240,12 @@ def validation_one_epoch(data_loader, model, device):
 
 @torch.no_grad()
 def final_test(data_loader, model, device, file):
+    """
+    [CF] 在测试集上进行最终推理，并保存详细结果到文件。
+    
+    输出格式：video_id, [logits], label, chunk_nb, split_nb
+    用于后续的多视角投票融合。
+    """
     criterion = torch.nn.CrossEntropyLoss()
 
     metric_logger = utils.MetricLogger(delimiter="  ")
@@ -201,6 +269,7 @@ def final_test(data_loader, model, device, file):
             output = model(videos)
             loss = criterion(output, target)
 
+        # 保存每个样本的详细预测结果
         for i in range(output.size(0)):
             string = "{} {} {} {} {}\n".format(ids[i], \
                                                 str(output.data[i].cpu().numpy().tolist()), \
@@ -231,11 +300,18 @@ def final_test(data_loader, model, device, file):
 
 
 def merge(eval_path, num_tasks):
+    """
+    [CF] 合并多个进程的测试结果，进行多视角投票。
+    
+    在测试时，每个视频会被采样多个时间片段和空间裁剪，
+    此函数收集所有视角的预测，通过平均 logits 或 softmax 概率，
+    得到最终的视频级预测结果。
+    """
     dict_feats = {}
     dict_label = {}
     dict_pos = {}
     print("Reading individual output files")
-
+    # 读取所有进程的输出文件
     for x in range(num_tasks):
         file = os.path.join(eval_path, str(x) + '.txt')
         lines = open(file, 'r').readlines()[1:]
@@ -257,7 +333,7 @@ def merge(eval_path, num_tasks):
             dict_pos[name].append(chunk_nb + split_nb)
             dict_label[name] = label
     print("Computing final results")
-
+    # 多进程计算每个视频的最终预测
     input_lst = []
     print(len(dict_feats))
     for i, item in enumerate(dict_feats):
@@ -273,6 +349,12 @@ def merge(eval_path, num_tasks):
     return final_top1*100 ,final_top5*100
 
 def compute_video(lst):
+    """
+    [CF] 计算单个视频的多视角融合预测。
+    
+    将同一视频的多个视角（时间片段+空间裁剪）的预测概率取平均，
+    然后计算 top-1 和 top-5 准确率。
+    """
     i, video_id, data, label = lst
     feat = [x for x in data]
     feat = np.mean(feat, axis=0)

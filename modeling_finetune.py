@@ -1,3 +1,8 @@
+# [CF] 2026-04-10:
+# 这个文件定义了 VideoMAE 的基础模型组件，是构建整个 VideoMAE 的"砖块"。
+# 它包含标准的 Transformer 组件（如 Attention, MLP, Block）以及视频专用的 PatchEmbed。
+# 这些组件被 modeling_pretrain.py (预训练) 和 run_class_finetuning.py (微调) 共同使用。
+
 from functools import partial
 import numpy as np
 import torch
@@ -9,6 +14,10 @@ import torch.utils.checkpoint as checkpoint
 
 
 def _cfg(url='', **kwargs):
+    """
+    [CF] 返回模型配置字典，包含输入尺寸、归一化参数等。
+    主要用于 timm 库的模型注册系统。
+    """
     return {
         'url': url,
         'num_classes': 400, 'input_size': (3, 224, 224), 'pool_size': None,
@@ -20,6 +29,11 @@ def _cfg(url='', **kwargs):
 
 class DropPath(nn.Module):
     """Drop paths (Stochastic Depth) per sample  (when applied in main path of residual blocks).
+
+    [CF] DropPath (Stochastic Depth) 模块。
+    
+    在残差连接的主路径上随机丢弃整个层，是一种强大的正则化手段。
+    训练时以 drop_prob 的概率将整层的输出置为 0，推理时正常通过。
     """
     def __init__(self, drop_prob=None):
         super(DropPath, self).__init__()
@@ -33,6 +47,12 @@ class DropPath(nn.Module):
 
 
 class Mlp(nn.Module):
+    """
+    [CF] Transformer 中的 MLP (多层感知机) 模块。
+    
+    结构: Linear -> GELU -> Dropout -> Linear -> Dropout
+    注意：这里的 Dropout 顺序与原版 BERT 略有不同（在第二个 Linear 之后）。
+    """
     def __init__(self, in_features, hidden_features=None, out_features=None, act_layer=nn.GELU, drop=0.):
         super().__init__()
         out_features = out_features or in_features
@@ -53,6 +73,11 @@ class Mlp(nn.Module):
 
 
 class Attention(nn.Module):
+    """
+    [CF] 多头自注意力 (Multi-Head Self-Attention) 模块。
+    
+    支持可选的 QKV 偏置，以及独立的注意力头维度设置。
+    """
     def __init__(
             self, dim, num_heads=8, qkv_bias=False, qk_scale=None, attn_drop=0.,
             proj_drop=0., attn_head_dim=None):
@@ -169,51 +194,74 @@ def get_sinusoid_encoding_table(n_position, d_hid):
 
     return  torch.tensor(sinusoid_table,dtype=torch.float, requires_grad=False).unsqueeze(0) 
 
+# [CF] ============================================================================
+# [CF] VisionTransformer 类 - 微调阶段使用的标准视频分类模型
+# [CF] 这是 VideoMAE 预训练完成后，用于下游任务（如动作识别）的模型。
+# [CF] 它移除了预训练时的解码器和掩码令牌，只保留编码器并添加分类头。
+# [CF] ============================================================================
 
 class VisionTransformer(nn.Module):
     """ Vision Transformer with support for patch or hybrid CNN input stage
+    [CF] 视频 Vision Transformer (ViT)
+    
+    这是微调阶段使用的标准模型结构。它与预训练模型的主要区别是：
+    1. 只有编码器，没有解码器和掩码令牌
+    2. 编码器处理所有 patches（不再有掩码）
+    3. 输出是一个分类头，用于预测动作类别
+    
+    支持的特性：
+    - 可学习的位置编码 vs 正弦-余弦位置编码
+    - 梯度检查点 (use_checkpoint) 用于节省显存
+    - 平均池化 vs CLS Token 两种聚合方式
     """
     def __init__(self, 
-                 img_size=224, 
-                 patch_size=16, 
-                 in_chans=3, 
-                 num_classes=1000, 
-                 embed_dim=768, 
-                 depth=12,
-                 num_heads=12, 
-                 mlp_ratio=4., 
-                 qkv_bias=False, 
-                 qk_scale=None, 
-                 fc_drop_rate=0., 
-                 drop_rate=0., 
-                 attn_drop_rate=0.,
-                 drop_path_rate=0., 
-                 norm_layer=nn.LayerNorm, 
-                 init_values=0.,
-                 use_learnable_pos_emb=False, 
-                 init_scale=0.,
-                 all_frames=16,
-                 tubelet_size=2,
-                 use_checkpoint=False,
-                 use_mean_pooling=True):
+                 img_size=224,           # 输入帧的空间尺寸
+                 patch_size=16,          # 空间 patch 大小
+                 in_chans=3,             # 输入通道数 (RGB=3)
+                 num_classes=1000,       # 分类类别数
+                 embed_dim=768,          # 嵌入维度
+                 depth=12,               # Transformer 层数
+                 num_heads=12,           # 注意力头数
+                 mlp_ratio=4.,           # MLP 隐藏层维度倍数
+                 qkv_bias=False,         # QKV 投影是否使用偏置
+                 qk_scale=None,          # 注意力缩放因子
+                 fc_drop_rate=0.,        # 分类头前的 Dropout 率
+                 drop_rate=0.,           # 一般 Dropout 率
+                 attn_drop_rate=0.,      # 注意力 Dropout 率
+                 drop_path_rate=0.,      # DropPath (随机深度) 率
+                 norm_layer=nn.LayerNorm, # 归一化层类型
+                 init_values=0.,         # LayerScale 初始值 (0 表示不使用)
+                 use_learnable_pos_emb=False, # 是否使用可学习的位置编码
+                 init_scale=0.,          # 分类头权重的初始缩放因子
+                 all_frames=16,          # 输入视频的总帧数
+                 tubelet_size=2,         # 时间维度的 tubelet 大小
+                 use_checkpoint=False,   # 是否使用梯度检查点节省显存
+                 use_mean_pooling=True): # 是否使用平均池化 (否则使用 CLS Token)
         super().__init__()
         self.num_classes = num_classes
         self.num_features = self.embed_dim = embed_dim  # num_features for consistency with other models
         self.tubelet_size = tubelet_size
+
+        # [CF] 1. Patch Embedding: 将视频转换为 patch 序列
         self.patch_embed = PatchEmbed(
             img_size=img_size, patch_size=patch_size, in_chans=in_chans, embed_dim=embed_dim, num_frames=all_frames, tubelet_size=self.tubelet_size)
         num_patches = self.patch_embed.num_patches
         self.use_checkpoint = use_checkpoint
 
+        # [CF] 2. 位置编码
         if use_learnable_pos_emb:
+            # [CF] 可学习的位置编码（像 BERT 那样）
             self.pos_embed = nn.Parameter(torch.zeros(1, num_patches, embed_dim))
         else:
             # sine-cosine positional embeddings is on the way
+            # [CF] 正弦-余弦位置编码（像原始 Transformer 那样）
+            # 这是 VideoMAE 默认使用的方式，不需要训练
             self.pos_embed = get_sinusoid_encoding_table(num_patches, embed_dim)
 
         self.pos_drop = nn.Dropout(p=drop_rate)
 
-
+        # [CF] 3. Transformer 编码器层
+        # DropPath 率从 0 线性增加到 drop_path_rate
         dpr = [x.item() for x in torch.linspace(0, drop_path_rate, depth)]  # stochastic depth decay rule
         self.blocks = nn.ModuleList([
             Block(
@@ -221,21 +269,31 @@ class VisionTransformer(nn.Module):
                 drop=drop_rate, attn_drop=attn_drop_rate, drop_path=dpr[i], norm_layer=norm_layer,
                 init_values=init_values)
             for i in range(depth)])
+        
+        # [CF] 4. 输出层
+        # 根据池化方式选择不同的归一化策略
         self.norm = nn.Identity() if use_mean_pooling else norm_layer(embed_dim)
         self.fc_norm = norm_layer(embed_dim) if use_mean_pooling else None
         self.fc_dropout = nn.Dropout(p=fc_drop_rate) if fc_drop_rate > 0 else nn.Identity()
         self.head = nn.Linear(embed_dim, num_classes) if num_classes > 0 else nn.Identity()
 
+        # [CF] 5. 权重初始化
         if use_learnable_pos_emb:
             trunc_normal_(self.pos_embed, std=.02)
 
         trunc_normal_(self.head.weight, std=.02)
         self.apply(self._init_weights)
 
+        # [CF] 对分类头权重进行额外的缩放（用于稳定训练）
         self.head.weight.data.mul_(init_scale)
         self.head.bias.data.mul_(init_scale)
 
     def _init_weights(self, m):
+        """
+        [CF] 权重初始化函数。
+        - Linear 层: 截断正态分布 (std=0.02)
+        - LayerNorm: bias=0, weight=1
+        """
         if isinstance(m, nn.Linear):
             trunc_normal_(m.weight, std=.02)
             if isinstance(m, nn.Linear) and m.bias is not None:
@@ -284,9 +342,18 @@ class VisionTransformer(nn.Module):
         x = self.head(self.fc_dropout(x))
         return x
 
+# [CF] ============================================================================
+# [CF] 模型注册函数
+# [CF] 使用 @register_model 装饰器将模型注册到 timm 的模型库中，
+# [CF] 这样就可以通过 create_model('vit_base_patch16_224') 来创建模型。
+# [CF] ============================================================================
 
 @register_model
 def vit_small_patch16_224(pretrained=False, **kwargs):
+    """
+    [CF] ViT-Small: embed_dim=384, depth=12, num_heads=6
+    最小的 ViT 变体，参数量约 22M
+    """
     model = VisionTransformer(
         patch_size=16, embed_dim=384, depth=12, num_heads=6, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -296,6 +363,10 @@ def vit_small_patch16_224(pretrained=False, **kwargs):
 
 @register_model
 def vit_base_patch16_224(pretrained=False, **kwargs):
+    """
+    [CF] ViT-Base: embed_dim=768, depth=12, num_heads=12
+    VideoMAE 最常用的配置，参数量约 86M
+    """
     model = VisionTransformer(
         patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -305,6 +376,10 @@ def vit_base_patch16_224(pretrained=False, **kwargs):
 
 @register_model
 def vit_base_patch16_384(pretrained=False, **kwargs):
+    """
+    [CF] ViT-Base with 384x384 输入
+    更大的输入尺寸可以捕捉更多细节，但计算量更大
+    """
     model = VisionTransformer(
         img_size=384, patch_size=16, embed_dim=768, depth=12, num_heads=12, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -314,6 +389,10 @@ def vit_base_patch16_384(pretrained=False, **kwargs):
 
 @register_model
 def vit_large_patch16_224(pretrained=False, **kwargs):
+    """
+    [CF] ViT-Large: embed_dim=1024, depth=24, num_heads=16
+    参数量约 307M
+    """
     model = VisionTransformer(
         patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -323,6 +402,7 @@ def vit_large_patch16_224(pretrained=False, **kwargs):
 
 @register_model
 def vit_large_patch16_384(pretrained=False, **kwargs):
+    """[CF] ViT-Large with 384x384 输入"""
     model = VisionTransformer(
         img_size=384, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -332,6 +412,7 @@ def vit_large_patch16_384(pretrained=False, **kwargs):
 
 @register_model
 def vit_large_patch16_512(pretrained=False, **kwargs):
+    """[CF] ViT-Large with 512x512 输入"""
     model = VisionTransformer(
         img_size=512, patch_size=16, embed_dim=1024, depth=24, num_heads=16, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)
@@ -341,6 +422,10 @@ def vit_large_patch16_512(pretrained=False, **kwargs):
 
 @register_model
 def vit_huge_patch16_224(pretrained=False, **kwargs):
+    """
+    [CF] ViT-Huge: embed_dim=1280, depth=32, num_heads=16
+    参数量约 632M，需要大量显存
+    """
     model = VisionTransformer(
         patch_size=16, embed_dim=1280, depth=32, num_heads=16, mlp_ratio=4, qkv_bias=True,
         norm_layer=partial(nn.LayerNorm, eps=1e-6), **kwargs)

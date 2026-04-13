@@ -1,3 +1,5 @@
+# Chenfei 2026-04-10: 设置预训练的参数的脚本
+
 # Set the path to save checkpoints
 OUTPUT_DIR='YOUR_PATH/ssv2_videomae_pretrain_small_patch16_224_frame_16x2_tube_mask_ratio_0.9_e2400'
 # Set the path to SSV2 train set. 

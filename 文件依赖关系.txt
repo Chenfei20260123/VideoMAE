@@ -1,0 +1,19 @@
+functional.py（剪裁，resize每一帧视频，数据处理），masking_generator.py（生成视频patch的遮挡），mixup.py（微调阶段的数据增强），modeling_finetune.py（基本理解，代码主要模块构成），optim_factory.py（优化器工厂），rand_augment.py（数据增强），random_erasing.py（随机遮挡擦除），transforms.py（视频逐帧剪裁），utils.py（工具箱，提供训练过程中需要的各种辅助功能），volume_transforms.py（视频张量转换）
+
+####################################
+engine_for_pretraining.py（预训练） 需要 utils.py
+engine_for_finetuning.py（微调） 需要 mixup.py，utils.py
+modeling_pretrain.py（预训练建模） 需要 modeling_finetune.py
+video_transforms.py（视频剪裁变换） 需要 functional.py，random_erasing.py，rand_augment.py
+
+####################################
+kinetics.py（数据集的微调测试预训练） 需要 random_erasing.py，volume_transforms.py。 video_transforms.py
+ssv2.py（类似kinetics.py，但是禁用水平翻转改变语义） 需要 random_erasing.py，volume_transforms.py。 video_transforms.py
+
+####################################
+datasets.py（数据准备） 需要 masking_generator.py，transforms.py。kinetics.py，ssv2.py
+
+####################################
+run_class_finetuning.py（微调总入口） 需要 modeling_finetune.py，optim_factory.py，utils.py。 engine_for_finetuning.py。datasets.py
+run_mae_pretraining.py（预训练总入口） 需要 engine_for_pretraining.py，utils.py，optim_factory.py。 modeling_pretrain.py。 datasets.py
+run_videomae_vis.py（可视化总入口） 需要 masking_generator.py，transforms.py，utils.py。 modeling_pretrain.py。 datasets.py

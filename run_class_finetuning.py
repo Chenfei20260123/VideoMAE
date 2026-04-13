@@ -1,3 +1,8 @@
+# [CF] 2026-04-13:
+# 这个文件是 VideoMAE 微调和评估的总入口脚本。
+# 它负责解析命令行参数，构建数据加载器、模型、优化器等，
+# 并调用 engine_for_finetuning.py 中的训练和评估函数。
+
 import argparse
 import datetime
 import numpy as np
@@ -25,13 +30,18 @@ import modeling_finetune
 
 
 def get_args():
+    """
+    [CF] 解析命令行参数。
+    包含训练超参数、模型配置、数据增强、优化器、数据集路径等。
+    """
     parser = argparse.ArgumentParser('VideoMAE fine-tuning and evaluation script for video classification', add_help=False)
+    # 基础训练参数
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=30, type=int)
     parser.add_argument('--update_freq', default=1, type=int)
     parser.add_argument('--save_ckpt_freq', default=100, type=int)
 
-    # Model parameters
+    # Model parameters # 模型参数
     parser.add_argument('--model', default='vit_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
     parser.add_argument('--tubelet_size', type=int, default= 2)
@@ -46,13 +56,13 @@ def get_args():
                         help='Attention dropout rate (default: 0.)')
     parser.add_argument('--drop_path', type=float, default=0.1, metavar='PCT',
                         help='Drop path rate (default: 0.1)')
-
+    # EMA (指数移动平均) 参数
     parser.add_argument('--disable_eval_during_finetuning', action='store_true', default=False)
     parser.add_argument('--model_ema', action='store_true', default=False)
     parser.add_argument('--model_ema_decay', type=float, default=0.9999, help='')
     parser.add_argument('--model_ema_force_cpu', action='store_true', default=False, help='')
 
-    # Optimizer parameters
+    # Optimizer parameters # 优化器参数
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
                         help='Optimizer (default: "adamw"')
     parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
@@ -83,7 +93,7 @@ def get_args():
     parser.add_argument('--warmup_steps', type=int, default=-1, metavar='N',
                         help='num of steps to warmup LR, will overload warmup_epochs if set > 0')
 
-    # Augmentation parameters
+    # Augmentation parameters # 数据增强参数
     parser.add_argument('--color_jitter', type=float, default=0.4, metavar='PCT',
                         help='Color jitter factor (default: 0.4)')
     parser.add_argument('--num_sample', type=int, default=2,
@@ -95,13 +105,13 @@ def get_args():
     parser.add_argument('--train_interpolation', type=str, default='bicubic',
                         help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
 
-    # Evaluation parameters
+    # Evaluation parameters # 评估参数
     parser.add_argument('--crop_pct', type=float, default=None)
     parser.add_argument('--short_side_size', type=int, default=224)
     parser.add_argument('--test_num_segment', type=int, default=5)
     parser.add_argument('--test_num_crop', type=int, default=3)
     
-    # Random Erase params
+    # Random Erase params # 随机擦除参数
     parser.add_argument('--reprob', type=float, default=0.25, metavar='PCT',
                         help='Random erase prob (default: 0.25)')
     parser.add_argument('--remode', type=str, default='pixel',
@@ -125,7 +135,7 @@ def get_args():
     parser.add_argument('--mixup_mode', type=str, default='batch',
                         help='How to apply mixup/cutmix params. Per "batch", "pair", or "elem"')
 
-    # Finetuning params
+    # Finetuning params # 微调参数
     parser.add_argument('--finetune', default='', help='finetune from checkpoint')
     parser.add_argument('--model_key', default='model|module', type=str)
     parser.add_argument('--model_prefix', default='', type=str)
@@ -136,7 +146,7 @@ def get_args():
     parser.set_defaults(use_mean_pooling=True)
     parser.add_argument('--use_cls', action='store_false', dest='use_mean_pooling')
 
-    # Dataset parameters
+    # Dataset parameters # 数据集参数
     parser.add_argument('--data_path', default='/path/to/list_kinetics-400', type=str,
                         help='dataset path')
     parser.add_argument('--eval_data_path', default=None, type=str,
@@ -149,6 +159,7 @@ def get_args():
     parser.add_argument('--sampling_rate', type=int, default= 4)
     parser.add_argument('--data_set', default='Kinetics-400', choices=['Kinetics-400', 'SSV2', 'UCF101', 'HMDB51','image_folder'],
                         type=str, help='dataset')
+    # 输出和日志
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
@@ -178,7 +189,7 @@ def get_args():
     parser.add_argument('--no_pin_mem', action='store_false', dest='pin_mem')
     parser.set_defaults(pin_mem=True)
 
-    # distributed training parameters
+    # distributed training parameters # 分布式训练参数
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
@@ -206,6 +217,10 @@ def get_args():
 
 
 def main(args, ds_init):
+    """
+    [CF] 主函数：执行完整的微调或评估流程。
+    """
+    # 初始化分布式训练环境
     utils.init_distributed_mode(args)
 
     if ds_init is not None:
@@ -215,14 +230,14 @@ def main(args, ds_init):
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
+    # fix the seed for reproducibility # 固定随机种子
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
     # random.seed(seed)
 
     cudnn.benchmark = True
-
+    # 构建数据集
     dataset_train, args.nb_classes = build_dataset(is_train=True, test_mode=False, args=args)
     if args.disable_eval_during_finetuning:
         dataset_val = None
@@ -230,7 +245,7 @@ def main(args, ds_init):
         dataset_val, _ = build_dataset(is_train=False, test_mode=False, args=args)
     dataset_test, _ = build_dataset(is_train=False, test_mode=True, args=args)
     
-
+    # 分布式采样器
     num_tasks = utils.get_world_size()
     global_rank = utils.get_rank()
     sampler_train = torch.utils.data.DistributedSampler(
@@ -249,12 +264,14 @@ def main(args, ds_init):
     else:
         sampler_val = torch.utils.data.SequentialSampler(dataset_val)
 
+    # TensorBoard 日志
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
 
+    # 数据加载器
     if args.num_sample > 1:
         collate_func = partial(multiple_samples_collate, fold=False)
     else:
@@ -291,6 +308,7 @@ def main(args, ds_init):
     else:
         data_loader_test = None
 
+    # Mixup 数据增强
     mixup_fn = None
     mixup_active = args.mixup > 0 or args.cutmix > 0. or args.cutmix_minmax is not None
     if mixup_active:
@@ -300,6 +318,7 @@ def main(args, ds_init):
             prob=args.mixup_prob, switch_prob=args.mixup_switch_prob, mode=args.mixup_mode,
             label_smoothing=args.smoothing, num_classes=args.nb_classes)
 
+    # 创建模型
     model = create_model(
         args.model,
         pretrained=False,
@@ -320,7 +339,7 @@ def main(args, ds_init):
     print("Patch size = %s" % str(patch_size))
     args.window_size = (args.num_frames // 2, args.input_size // patch_size[0], args.input_size // patch_size[1])
     args.patch_size = patch_size
-
+    # 加载预训练权重
     if args.finetune:
         if args.finetune.startswith('https'):
             checkpoint = torch.hub.load_state_dict_from_url(
@@ -385,7 +404,7 @@ def main(args, ds_init):
         utils.load_state_dict(model, checkpoint_model, prefix=args.model_prefix)
 
     model.to(device)
-
+    # 模型 EMA
     model_ema = None
     if args.model_ema:
         model_ema = ModelEma(
@@ -400,7 +419,7 @@ def main(args, ds_init):
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params:', n_parameters)
-
+    # 计算有效批次大小和训练步数
     total_batch_size = args.batch_size * args.update_freq * utils.get_world_size()
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
     args.lr = args.lr * total_batch_size / 256
@@ -411,7 +430,7 @@ def main(args, ds_init):
     print("Update frequent = %d" % args.update_freq)
     print("Number of training examples = %d" % len(dataset_train))
     print("Number of training training per epoch = %d" % num_training_steps_per_epoch)
-
+    # 分层学习率衰减
     num_layers = model_without_ddp.get_num_layers()
     if args.layer_decay < 1.0:
         assigner = LayerDecayValueAssigner(list(args.layer_decay ** (num_layers + 1 - i) for i in range(num_layers + 2)))
@@ -421,10 +440,12 @@ def main(args, ds_init):
     if assigner is not None:
         print("Assigned values = %s" % str(assigner.values))
 
+    # 创建优化器和损失缩放器
     skip_weight_decay_list = model.no_weight_decay()
     print("Skip weight decay list: ", skip_weight_decay_list)
 
     if args.enable_deepspeed:
+        # DeepSpeed 模式
         loss_scaler = None
         optimizer_params = get_parameter_groups(
             model, args.weight_decay, skip_weight_decay_list,
@@ -437,6 +458,7 @@ def main(args, ds_init):
         print("model.gradient_accumulation_steps() = %d" % model.gradient_accumulation_steps())
         assert model.gradient_accumulation_steps() == args.update_freq
     else:
+        # 标准模式
         if args.distributed:
             model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=True)
             model_without_ddp = model.module
@@ -447,7 +469,7 @@ def main(args, ds_init):
             get_layer_scale=assigner.get_scale if assigner is not None else None)
         loss_scaler = NativeScaler()
 
-    print("Use step level LR scheduler!")
+    print("Use step level LR scheduler!") # 学习率和权重衰减的余弦调度
     lr_schedule_values = utils.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
         warmup_epochs=args.warmup_epochs, warmup_steps=args.warmup_steps,
@@ -457,7 +479,7 @@ def main(args, ds_init):
     wd_schedule_values = utils.cosine_scheduler(
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
-
+    # 损失函数
     if mixup_fn is not None:
         # smoothing is handled with mixup label transform
         criterion = SoftTargetCrossEntropy()
@@ -467,11 +489,12 @@ def main(args, ds_init):
         criterion = torch.nn.CrossEntropyLoss()
 
     print("criterion = %s" % str(criterion))
-
+    # 自动恢复检查点
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp,
         optimizer=optimizer, loss_scaler=loss_scaler, model_ema=model_ema)
-
+    
+    # 仅评估模式
     if args.eval:
         preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
         test_stats = final_test(data_loader_test, model, device, preds_file)
@@ -488,7 +511,7 @@ def main(args, ds_init):
         exit(0)
         
 
-    print(f"Start training for {args.epochs} epochs")
+    print(f"Start training for {args.epochs} epochs") # 训练循环
     start_time = time.time()
     max_accuracy = 0.0
     for epoch in range(args.start_epoch, args.epochs):
@@ -496,6 +519,7 @@ def main(args, ds_init):
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch * args.update_freq)
+        # 训练一个 epoch
         train_stats = train_one_epoch(
             model, criterion, data_loader_train, optimizer,
             device, epoch, loss_scaler, args.clip_grad, model_ema, mixup_fn,
@@ -503,11 +527,13 @@ def main(args, ds_init):
             lr_schedule_values=lr_schedule_values, wd_schedule_values=wd_schedule_values,
             num_training_steps_per_epoch=num_training_steps_per_epoch, update_freq=args.update_freq,
         )
+        # 保存检查点
         if args.output_dir and args.save_ckpt:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch, model_ema=model_ema)
+        # 验证
         if data_loader_val is not None:
             test_stats = validation_one_epoch(data_loader_val, model, device)
             print(f"Accuracy of the network on the {len(dataset_val)} val videos: {test_stats['acc1']:.1f}%")
@@ -537,7 +563,8 @@ def main(args, ds_init):
                 log_writer.flush()
             with open(os.path.join(args.output_dir, "log.txt"), mode="a", encoding="utf-8") as f:
                 f.write(json.dumps(log_stats) + "\n")
-
+                
+    # 最终测试
     preds_file = os.path.join(args.output_dir, str(global_rank) + '.txt')
     test_stats = final_test(data_loader_test, model, device, preds_file)
     torch.distributed.barrier()

@@ -1,3 +1,8 @@
+# [CF] 2026-04-13:
+# 这个文件专门用于加载 Something-Something V2 (SSV2) 数据集。
+# SSV2 是一个强调时序动作理解的数据集，包含 174 类细粒度人体动作。
+# 与 Kinetics 等基于场景的数据集不同，SSV2 的动作识别更依赖于时序信息。
+
 import os
 import numpy as np
 import torch
@@ -11,7 +16,15 @@ import volume_transforms as volume_transforms
 
 
 class SSVideoClsDataset(Dataset):
-    """Load your own video classification dataset."""
+    """Load your own video classification dataset."""    
+    """
+    [CF] Something-Something V2 视频分类数据集类。
+    
+    与 VideoClsDataset 的核心区别：
+    1. 时间采样策略不同：SSV2 动作持续时间短，需要密集采样
+    2. 数据增强不同：禁用水平翻转（动作方向敏感）
+    3. 测试时的时间采样不同：使用均匀采样而非分段采样
+    """
 
     def __init__(self, anno_path, data_path, mode='train', clip_len=8,
                 crop_size=224, short_side_size=256, new_height=256,
@@ -39,7 +52,8 @@ class SSVideoClsDataset(Dataset):
                 self.rand_erase = True
         if VideoReader is None:
             raise ImportError("Unable to import `decord` which is required to read videos.")
-
+        
+        # 读取标注文件
         import pandas as pd
         cleaned = pd.read_csv(self.anno_path, header=None, delimiter=' ')
         self.dataset_samples = list(cleaned.values[:, 0])
@@ -157,6 +171,7 @@ class SSVideoClsDataset(Dataset):
         buffer,
         args,
     ):
+        """训练数据增强，与 VideoClsDataset 类似。"""
 
         aug_transform = video_transforms.create_random_augment(
             input_size=(self.crop_size, self.crop_size),
@@ -216,6 +231,13 @@ class SSVideoClsDataset(Dataset):
 
     def loadvideo_decord(self, sample, sample_rate_scale=1):
         """Load video content using Decord"""
+        """
+        [CF] 使用 Decord 加载视频帧。
+        
+        SSV2 的时间采样与 Kinetics 有显著不同：
+        - 训练时：将视频均匀分成 num_segments 段，每段随机取 1 帧
+        - 测试时：在视频前半段和后半段分别密集采样
+        """
         fname = sample
 
         if not (os.path.exists(fname)):
@@ -236,6 +258,8 @@ class SSVideoClsDataset(Dataset):
             return []
 
         if self.mode == 'test':
+            # [CF] SSV2 测试时的特殊采样策略：
+            # 在视频的前半段和后半段分别采样，捕获动作的关键时刻
             all_index = []
             tick = len(vr) / float(self.num_segment)
             all_index = list(np.array([int(tick / 2.0 + tick * x) for x in range(self.num_segment)] +
@@ -268,7 +292,7 @@ class SSVideoClsDataset(Dataset):
         else:
             return len(self.test_dataset)
 
-
+# [CF] 以下辅助函数与 kinetics.py 中完全相同
 def spatial_sampling(
     frames,
     spatial_idx=-1,

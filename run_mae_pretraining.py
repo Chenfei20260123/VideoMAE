@@ -1,3 +1,8 @@
+# [CF] 2026-04-13:
+# 这个文件是 VideoMAE 预训练的总入口脚本。
+# 它负责解析命令行参数、构建预训练数据集、创建模型和优化器，
+# 并调用 engine_for_pretraining.py 执行掩码重建的自监督训练。
+
 import argparse
 import datetime
 import numpy as np
@@ -17,12 +22,17 @@ import modeling_pretrain
 
 
 def get_args():
+    """
+    [CF] 解析预训练的命令行参数。
+    包含模型配置、掩码策略、优化器参数等。
+    """
     parser = argparse.ArgumentParser('VideoMAE pre-training script', add_help=False)
+    # 基础训练参数
     parser.add_argument('--batch_size', default=64, type=int)
     parser.add_argument('--epochs', default=800, type=int)
     parser.add_argument('--save_ckpt_freq', default=50, type=int)
 
-    # Model parameters
+    # Model parameters # 模型参数
     parser.add_argument('--model', default='pretrain_videomae_base_patch16_224', type=str, metavar='MODEL',
                         help='Name of model to train')
 
@@ -44,7 +54,7 @@ def get_args():
     parser.add_argument('--normlize_target', default=True, type=bool,
                         help='normalized the target patch pixels')
 
-    # Optimizer parameters
+    # Optimizer parameters # 优化器参数
     parser.add_argument('--opt', default='adamw', type=str, metavar='OPTIMIZER',
                         help='Optimizer (default: "adamw"')
     parser.add_argument('--opt_eps', default=1e-8, type=float, metavar='EPSILON',
@@ -60,7 +70,8 @@ def get_args():
     parser.add_argument('--weight_decay_end', type=float, default=None, help="""Final value of the
         weight decay. We use a cosine schedule for WD. 
         (Set the same value with args.weight_decay to keep weight decay no change)""")
-
+    
+    # 学习率参数
     parser.add_argument('--lr', type=float, default=1.5e-4, metavar='LR',
                         help='learning rate (default: 1.5e-4)')
     parser.add_argument('--warmup_lr', type=float, default=1e-6, metavar='LR',
@@ -75,18 +86,19 @@ def get_args():
     parser.add_argument('--use_checkpoint', action='store_true')
     parser.set_defaults(use_checkpoint=False)
 
-    # Augmentation parameters
+    # Augmentation parameters # 数据增强参数（预训练阶段相对简单）
     parser.add_argument('--color_jitter', type=float, default=0.0, metavar='PCT',
                         help='Color jitter factor (default: 0.4)')
     parser.add_argument('--train_interpolation', type=str, default='bicubic',
                         help='Training interpolation (random, bilinear, bicubic default: "bicubic")')
 
-    # Dataset parameters
+    # Dataset parameters  # 数据集参数
     parser.add_argument('--data_path', default='/path/to/list_kinetics-400', type=str,
                         help='dataset path')
     parser.add_argument('--imagenet_default_mean_and_std', default=True, action='store_true')
     parser.add_argument('--num_frames', type=int, default= 16)
     parser.add_argument('--sampling_rate', type=int, default= 4)
+    # 输出和日志
     parser.add_argument('--output_dir', default='',
                         help='path where to save, empty for no saving')
     parser.add_argument('--log_dir', default=None,
@@ -108,7 +120,7 @@ def get_args():
                         help='')
     parser.set_defaults(pin_mem=True)
 
-    # distributed training parameters
+    # distributed training parameters # 分布式训练参数
     parser.add_argument('--world_size', default=1, type=int,
                         help='number of distributed processes')
     parser.add_argument('--local_rank', default=-1, type=int)
@@ -119,6 +131,10 @@ def get_args():
 
 
 def get_model(args):
+    """
+    [CF] 创建预训练模型。
+    使用 modeling_pretrain.py 中注册的模型。
+    """
     print(f"Creating model: {args.model}")
     model = create_model(
         args.model,
@@ -132,26 +148,33 @@ def get_model(args):
 
 
 def main(args):
+    """
+    [CF] 主函数：执行完整的预训练流程。
+    """
+    # 初始化分布式训练环境
     utils.init_distributed_mode(args)
 
     print(args)
 
     device = torch.device(args.device)
 
-    # fix the seed for reproducibility
+    # fix the seed for reproducibility # 固定随机种子
     seed = args.seed + utils.get_rank()
     torch.manual_seed(seed)
     np.random.seed(seed)
 
     cudnn.benchmark = True
-
+    # 创建模型
     model = get_model(args)
     patch_size = model.encoder.patch_embed.patch_size
     print("Patch size = %s" % str(patch_size))
+    # 计算窗口大小（用于掩码生成）
+    # 时间维度：num_frames // tubelet_size (默认 16 // 2 = 8)
+    # 空间维度：input_size // patch_size (默认 224 // 16 = 14)
     args.window_size = (args.num_frames // 2, args.input_size // patch_size[0], args.input_size // patch_size[1])
     args.patch_size = patch_size
 
-    # get dataset
+    # get dataset # 构建预训练数据集（包含掩码生成）
     dataset_train = build_pretraining_dataset(args)
 
 
@@ -161,19 +184,20 @@ def main(args):
 
     total_batch_size = args.batch_size * num_tasks
     num_training_steps_per_epoch = len(dataset_train) // total_batch_size
-
+    # 分布式采样器
     sampler_train = torch.utils.data.DistributedSampler(
         dataset_train, num_replicas=num_tasks, rank=sampler_rank, shuffle=True
     )
     print("Sampler_train = %s" % str(sampler_train))
 
-
+    # TensorBoard 日志
     if global_rank == 0 and args.log_dir is not None:
         os.makedirs(args.log_dir, exist_ok=True)
         log_writer = utils.TensorboardLogger(log_dir=args.log_dir)
     else:
         log_writer = None
 
+    # 数据加载器
     data_loader_train = torch.utils.data.DataLoader(
         dataset_train, sampler=sampler_train,
         batch_size=args.batch_size,
@@ -189,7 +213,7 @@ def main(args):
 
     print("Model = %s" % str(model_without_ddp))
     print('number of params: {} M'.format(n_parameters / 1e6))
-
+    # 学习率线性缩放（基准批次大小为 256）
     args.lr = args.lr * total_batch_size / 256
     args.min_lr = args.min_lr * total_batch_size / 256
     args.warmup_lr = args.warmup_lr * total_batch_size / 256
@@ -197,15 +221,16 @@ def main(args):
     print("Batch size = %d" % total_batch_size)
     print("Number of training steps = %d" % num_training_steps_per_epoch)
     print("Number of training examples per epoch = %d" % (total_batch_size * num_training_steps_per_epoch))
-
+    # 包装为分布式模型
     if args.distributed:
         model = torch.nn.parallel.DistributedDataParallel(model, device_ids=[args.gpu], find_unused_parameters=False)
         model_without_ddp = model.module
 
+    # 创建优化器和损失缩放器
     optimizer = create_optimizer(
         args, model_without_ddp)
     loss_scaler = NativeScaler()
-
+    # 学习率和权重衰减的余弦调度
     print("Use step level LR & WD scheduler!")
     lr_schedule_values = utils.cosine_scheduler(
         args.lr, args.min_lr, args.epochs, num_training_steps_per_epoch,
@@ -216,10 +241,11 @@ def main(args):
     wd_schedule_values = utils.cosine_scheduler(
         args.weight_decay, args.weight_decay_end, args.epochs, num_training_steps_per_epoch)
     print("Max WD = %.7f, Min WD = %.7f" % (max(wd_schedule_values), min(wd_schedule_values)))
-
+    # 自动恢复检查点
     utils.auto_load_model(
         args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer, loss_scaler=loss_scaler)
     torch.cuda.empty_cache()
+    # 训练循环
     print(f"Start training for {args.epochs} epochs")
     start_time = time.time()
     for epoch in range(args.start_epoch, args.epochs):
@@ -227,6 +253,7 @@ def main(args):
             data_loader_train.sampler.set_epoch(epoch)
         if log_writer is not None:
             log_writer.set_step(epoch * num_training_steps_per_epoch)
+        # 执行一个 epoch 的预训练
         train_stats = train_one_epoch(
             model, data_loader_train,
             optimizer, device, epoch, loss_scaler,
@@ -237,12 +264,14 @@ def main(args):
             patch_size=patch_size[0],
             normlize_target=args.normlize_target,
         )
+        # 保存检查点
         if args.output_dir:
             if (epoch + 1) % args.save_ckpt_freq == 0 or epoch + 1 == args.epochs:
                 utils.save_model(
                     args=args, model=model, model_without_ddp=model_without_ddp, optimizer=optimizer,
                     loss_scaler=loss_scaler, epoch=epoch)
-
+                
+        # 记录日志
         log_stats = {**{f'train_{k}': v for k, v in train_stats.items()},
                      'epoch': epoch, 'n_parameters': n_parameters}
 
